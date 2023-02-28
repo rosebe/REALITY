@@ -115,13 +115,13 @@ func Value(vals ...byte) (value int) {
 // using conn as the underlying transport.
 // The configuration config must be non-nil and must include
 // at least one certificate or else set GetCertificate.
-func Server(conn net.Conn, config *Config) (*Conn, error) {
+func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	remoteAddr := conn.RemoteAddr().String()
 	if config.Show {
 		fmt.Printf("REALITY remoteAddr: %v\n", remoteAddr)
 	}
 
-	target, err := net.Dial(config.Type, config.Dest)
+	target, err := config.DialContext(ctx, config.Type, config.Dest)
 	if err != nil {
 		conn.Close()
 		return nil, errors.New("REALITY: failed to dial dest: " + err.Error())
@@ -140,7 +140,7 @@ func Server(conn net.Conn, config *Config) (*Conn, error) {
 		underlying = pc.Raw()
 	}
 
-	hs := serverHandshakeStateTLS13{ctx: context.TODO()}
+	hs := serverHandshakeStateTLS13{ctx: context.Background()}
 
 	c2sSaved := make([]byte, 0, size)
 	s2cSaved := make([]byte, 0, size)
@@ -194,14 +194,14 @@ func Server(conn net.Conn, config *Config) (*Conn, error) {
 				break
 			}
 			readerConn := &ReaderConn{
-				Conn:   underlying,
+				Conn:   conn,
 				Reader: bytes.NewReader(c2sSaved),
 			}
 			hs.c = &Conn{
 				conn:   readerConn,
 				config: config,
 			}
-			hs.clientHello, err = hs.c.readClientHello(context.TODO())
+			hs.clientHello, err = hs.c.readClientHello(context.Background())
 			if err != nil || readerConn.Reader.Len() > 0 || readerConn.Written > 0 || readerConn.Closed {
 				break
 			}
@@ -247,15 +247,15 @@ func Server(conn net.Conn, config *Config) (*Conn, error) {
 					(config.MaxClientVer == nil || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
 					(config.MaxTimeDiff == 0 || time.Since(hs.c.ClientTime).Abs() <= config.MaxTimeDiff) &&
 					(config.ShortIds[hs.c.ClientShortId]) {
-					hs.c.conn = underlying
+					hs.c.conn = conn
 				}
 				hs.clientHello.keyShares[0].group = CurveID(i)
 				break
 			}
 			if config.Show {
-				fmt.Printf("REALITY remoteAddr: %v\ths.c.conn == underlying: %v\n", remoteAddr, hs.c.conn == underlying)
+				fmt.Printf("REALITY remoteAddr: %v\ths.c.conn == conn: %v\n", remoteAddr, hs.c.conn == conn)
 			}
-			if hs.c.conn == underlying {
+			if hs.c.conn == conn {
 				done = true
 			}
 			break
@@ -288,7 +288,7 @@ func Server(conn net.Conn, config *Config) (*Conn, error) {
 			}
 			mutex.Lock()
 			s2cSaved = append(s2cSaved, buf[:n]...)
-			if hs.c == nil || hs.c.conn != underlying {
+			if hs.c == nil || hs.c.conn != conn {
 				if _, err = conn.Write(buf[:n]); err != nil {
 					done = true
 					break
@@ -412,16 +412,24 @@ func Client(conn net.Conn, config *Config) *Conn {
 type listener struct {
 	net.Listener
 	config *Config
+	conns  chan net.Conn
+	err    error
 }
 
 // Accept waits for and returns the next incoming TLS connection.
 // The returned connection is of type *Conn.
 func (l *listener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
+	/*
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		return Server(c, l.config), nil
+	*/
+	if c, ok := <-l.conns; ok {
+		return c, nil
 	}
-	return Server(c, l.config)
+	return nil, l.err
 }
 
 // NewListener creates a Listener which accepts connections from an inner
@@ -432,6 +440,26 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 	l := new(listener)
 	l.Listener = inner
 	l.config = config
+	{
+		l.conns = make(chan net.Conn)
+		go func() {
+			for {
+				c, err := l.Listener.Accept()
+				if err != nil {
+					l.err = err
+					close(l.conns)
+					return
+				}
+				go func() {
+					defer recover()
+					c, err = Server(context.Background(), c, l.config)
+					if err == nil {
+						l.conns <- c
+					}
+				}()
+			}
+		}()
+	}
 	return l
 }
 
