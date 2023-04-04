@@ -40,54 +40,31 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-type ReaderConn struct {
-	Conn    net.Conn
-	Reader  *bytes.Reader
-	Written int
-	Closed  bool
+type WeakConn struct {
+	net.Conn
 }
 
-func (c *ReaderConn) Read(b []byte) (int, error) {
-	if c.Closed {
-		return 0, errors.New("Closed")
-	}
-	n, err := c.Reader.Read(b)
-	if err == io.EOF {
-		return n, errors.New("io.EOF") // prevent looping
-	}
-	return n, err
+func (c *WeakConn) Read(b []byte) (int, error) {
+	return 0, fmt.Errorf("Read(%v)", len(b))
 }
 
-func (c *ReaderConn) Write(b []byte) (int, error) {
-	if c.Closed {
-		return 0, errors.New("Closed")
-	}
-	c.Written += len(b)
-	return len(b), nil
+func (c *WeakConn) Write(b []byte) (int, error) {
+	return 0, fmt.Errorf("Write(%v)", len(b))
 }
 
-func (c *ReaderConn) Close() error {
-	c.Closed = true
+func (c *WeakConn) Close() error {
+	return fmt.Errorf("Close()")
+}
+
+func (c *WeakConn) SetDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *ReaderConn) LocalAddr() net.Addr {
-	return c.Conn.LocalAddr()
-}
-
-func (c *ReaderConn) RemoteAddr() net.Addr {
-	return c.Conn.RemoteAddr()
-}
-
-func (c *ReaderConn) SetDeadline(t time.Time) error {
+func (c *WeakConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *ReaderConn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *ReaderConn) SetWriteDeadline(t time.Time) error {
+func (c *WeakConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
@@ -175,7 +152,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				done = true
 				break
 			}
-			if copying || len(c2sSaved) > size || len(s2cSaved) > 0 { // follow; too long; unexpected
+			if len(c2sSaved) > size || copying { // too long; follow
 				break
 			}
 			if clientHelloLen == 0 && len(c2sSaved) > recordHeaderLen {
@@ -191,19 +168,12 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				mutex.Unlock()
 				continue
 			}
-			if len(c2sSaved) > clientHelloLen { // unexpected
-				break
-			}
-			readerConn := &ReaderConn{
-				Conn:   conn,
-				Reader: bytes.NewReader(c2sSaved),
-			}
 			hs.c = &Conn{
-				conn:   readerConn,
-				config: config,
+				conn:     &WeakConn{conn},
+				config:   config,
+				rawInput: *bytes.NewBuffer(c2sSaved),
 			}
-			hs.clientHello, err = hs.c.readClientHello(context.Background())
-			if err != nil || readerConn.Reader.Len() > 0 || readerConn.Written > 0 || readerConn.Closed {
+			if hs.clientHello, err = hs.c.readClientHello(context.Background()); err != nil {
 				break
 			}
 			if hs.c.vers != VersionTLS13 || !config.ServerNames[hs.clientHello.serverName] {
@@ -220,8 +190,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					break
 				}
 				if config.Show {
-					fmt.Printf("REALITY remoteAddr: %v\ths.clientHello.sessionId: %v\n", remoteAddr, hs.clientHello.sessionId)
-					fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey: %v\n", remoteAddr, hs.c.AuthKey)
+					fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey[:16]: %v\n", remoteAddr, hs.c.AuthKey[:16])
 				}
 				block, _ := aes.NewCipher(hs.c.AuthKey)
 				aead, _ := cipher.NewGCM(block)
@@ -234,11 +203,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				}
 				copy(hs.clientHello.sessionId, ciphertext)
 				copy(hs.c.ClientVer[:], plainText)
+				hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[4:])), 0)
 				copy(hs.c.ClientShortId[:], plainText[8:])
-				plainText[0] = 0
-				plainText[1] = 0
-				plainText[2] = 0
-				hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint64(plainText)), 0)
 				if config.Show {
 					fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientVer: %v\n", remoteAddr, hs.c.ClientVer)
 					fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
@@ -261,11 +227,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			}
 			break
 		}
-		if done {
-			mutex.Unlock()
-		} else {
-			copying = true
-			mutex.Unlock()
+		mutex.Unlock()
+		if !done {
 			io.CopyBuffer(target, underlying, buf)
 		}
 		waitGroup.Done()
@@ -290,15 +253,11 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			mutex.Lock()
 			s2cSaved = append(s2cSaved, buf[:n]...)
 			if hs.c == nil || hs.c.conn != conn {
+				copying = true
 				if _, err = conn.Write(buf[:n]); err != nil {
 					done = true
-					break
 				}
-				if copying || len(s2cSaved) > size { // follow; too long
-					break
-				}
-				mutex.Unlock()
-				continue
+				break
 			}
 			done = true // special
 			if len(s2cSaved) > size {
@@ -387,11 +346,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			handled = true
 			break
 		}
-		if done {
-			mutex.Unlock()
-		} else {
-			copying = true
-			mutex.Unlock()
+		mutex.Unlock()
+		if !done {
 			io.CopyBuffer(underlying, target, buf)
 		}
 		waitGroup.Done()
