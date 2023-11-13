@@ -2,12 +2,14 @@
 
 ### THE NEXT FUTURE
 
-Server side implementation of REALITY protocol, a fork of package tls in Go 1.19.5.  
+Server side implementation of REALITY protocol, a fork of package tls in latest [Go](https://github.com/golang/go/commits/master/src/crypto/tls).
 For client side, please follow https://github.com/XTLS/Xray-core/blob/main/transport/internet/reality/reality.go.  
 
 TODO List: TODO
 
-## VLESS-XTLS-uTLS-REALITY example for [Xray-core](https://github.com/XTLS/Xray-core) [中文]
+## VLESS-XTLS-uTLS-REALITY example for [Xray-core](https://github.com/XTLS/Xray-core)
+
+中文 | [English](README.en.md)
 
 ```json5
 {
@@ -41,7 +43,7 @@ TODO List: TODO
                     "maxClientVer": "", // 选填，客户端 Xray 最高版本，格式为 x.y.z
                     "maxTimeDiff": 0, // 选填，允许的最大时间差，单位为毫秒
                     "shortIds": [ // 必填，客户端可用的 shortId 列表，可用于区分不同的客户端
-                        "" // 若有此项，客户端 shortId 可为空
+                        "", // 若有此项，客户端 shortId 可为空
                         "0123456789abcdef" // 0 到 f，长度为 2 的倍数，长度上限为 16
                     ]
                 }

@@ -44,7 +44,7 @@ var (
 
 // CipherSuites returns a list of cipher suites currently implemented by this
 // package, excluding those with security issues, which are returned by
-// InsecureCipherSuites.
+// [InsecureCipherSuites].
 //
 // The list is sorted by ID. Note that the default cipher suites selected by
 // this package might depend on logic that can't be captured by a static list,
@@ -77,7 +77,7 @@ func CipherSuites() []*CipherSuite {
 // this package and which have security issues.
 //
 // Most applications should not use the cipher suites in this list, and should
-// only use those returned by CipherSuites.
+// only use those returned by [CipherSuites].
 func InsecureCipherSuites() []*CipherSuite {
 	// This list includes RC4, CBC_SHA256, and 3DES cipher suites. See
 	// cipherSuitesPreferenceOrder for details.
@@ -376,14 +376,6 @@ var aesgcmCiphers = map[uint16]bool{
 	TLS_AES_256_GCM_SHA384: true,
 }
 
-var nonAESGCMAEADCiphers = map[uint16]bool{
-	// TLS 1.2
-	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305:   true,
-	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305: true,
-	// TLS 1.3
-	TLS_CHACHA20_POLY1305_SHA256: true,
-}
-
 // aesgcmPreferred returns whether the first known cipher in the preference list
 // is an AES-GCM cipher, implying the peer has hardware support for it.
 func aesgcmPreferred(ciphers []uint16) bool {
@@ -466,7 +458,7 @@ func (f *prefixNonceAEAD) Open(out, nonce, ciphertext, additionalData []byte) ([
 	return f.aead.Open(out, f.nonce[:], ciphertext, additionalData)
 }
 
-// xoredNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
+// xorNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
 // before each call.
 type xorNonceAEAD struct {
 	nonceMask [aeadNonceLength]byte
