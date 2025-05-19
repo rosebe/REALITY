@@ -2,8 +2,23 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE-Go file.
 
-// Server side implementation of REALITY protocol, a fork of package tls in Go 1.20.
+// Server side implementation of REALITY protocol, a fork of package tls in latest Go.
 // For client side, please follow https://github.com/XTLS/Xray-core/blob/main/transport/internet/reality/reality.go.
+
+// Package tls partially implements TLS 1.2, as specified in RFC 5246,
+// and TLS 1.3, as specified in RFC 8446.
+//
+// # FIPS 140-3 mode
+//
+// When the program is in [FIPS 140-3 mode], this package behaves as if only
+// SP 800-140C and SP 800-140D approved protocol versions, cipher suites,
+// signature algorithms, certificate public key types and sizes, and key
+// exchange and derivation algorithms were implemented. Others are silently
+// ignored and not negotiated, or rejected. This set may depend on the
+// algorithms supported by the FIPS 140-3 Go Cryptographic Module selected with
+// GOFIPS140, and may change across Go versions.
+//
+// [FIPS 140-3 mode]: https://go.dev/doc/security/fips140
 package reality
 
 // BUG(agl): The crypto/tls package only implements some countermeasures
@@ -15,10 +30,9 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/mlkem"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -35,9 +49,11 @@ import (
 	"time"
 
 	"github.com/pires/go-proxyproto"
-	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
+
+	fipsaes "github.com/xtls/reality/aes"
+	"github.com/xtls/reality/gcm"
 )
 
 type CloseWriteConn interface {
@@ -158,11 +174,11 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	go func() {
 		for {
 			mutex.Lock()
-			hs.clientHello, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
+			hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
 			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.ServerNames[hs.clientHello.serverName] {
 				break
 			}
-			for i, keyShare := range hs.clientHello.keyShares {
+			for _, keyShare := range hs.clientHello.keyShares {
 				if keyShare.group != X25519 || len(keyShare.data) != 32 {
 					continue
 				}
@@ -172,13 +188,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if _, err = hkdf.New(sha256.New, hs.c.AuthKey, hs.clientHello.random[:20], []byte("REALITY")).Read(hs.c.AuthKey); err != nil {
 					break
 				}
-				var aead cipher.AEAD
-				if aesgcmPreferred(hs.clientHello.cipherSuites) {
-					block, _ := aes.NewCipher(hs.c.AuthKey)
-					aead, _ = cipher.NewGCM(block)
-				} else {
-					aead, _ = chacha20poly1305.New(hs.c.AuthKey)
-				}
+				block, _ := fipsaes.New(hs.c.AuthKey)
+				aead, _ := gcm.NewGCMForTLS13(block)
 				if config.Show {
 					fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey[:16]: %v\tAEAD: %T\n", remoteAddr, hs.c.AuthKey[:16], aead)
 				}
@@ -204,7 +215,6 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					(config.ShortIds[hs.c.ClientShortId]) {
 					hs.c.conn = conn
 				}
-				hs.clientHello.keyShares[0].group = CurveID(i)
 				break
 			}
 			if config.Show {
@@ -290,7 +300,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					if !hs.hello.unmarshal(s2cSaved[recordHeaderLen:handshakeLen]) ||
 						hs.hello.vers != VersionTLS12 || hs.hello.supportedVersion != VersionTLS13 ||
 						cipherSuiteTLS13ByID(hs.hello.cipherSuite) == nil ||
-						hs.hello.serverShare.group != X25519 || len(hs.hello.serverShare.data) != 32 {
+						(!(hs.hello.serverShare.group == X25519 && len(hs.hello.serverShare.data) == 32) &&
+							!(hs.hello.serverShare.group == X25519MLKEM768 && len(hs.hello.serverShare.data) == mlkem.CiphertextSize768+32)) {
 						break f
 					}
 				}
